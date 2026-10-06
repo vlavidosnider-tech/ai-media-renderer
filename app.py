@@ -68,9 +68,38 @@ def ass_escape(text):
     )
 
 
+def split_caption_chunks(text, max_words=3):
+    """
+    Split a scene subtitle into short Shorts/TikTok-style caption chunks.
+    Prefers punctuation boundaries, otherwise caps chunks at max_words.
+    """
+    words = str(text or "").strip().split()
+    if not words:
+        return []
+
+    chunks = []
+    current = []
+
+    for word in words:
+        current.append(word)
+
+        ends_phrase = bool(re.search(r"[,.!?;:…—-]$", word))
+        if len(current) >= max_words or (ends_phrase and len(current) >= 2):
+            chunks.append(" ".join(current))
+            current = []
+
+    if current:
+        if chunks and len(current) == 1 and len(chunks[-1].split()) <= 2:
+            chunks[-1] = chunks[-1] + " " + current[0]
+        else:
+            chunks.append(" ".join(current))
+
+    return chunks
+
+
 def make_ass(scenes, durations, path, width, height):
-    font_size = 52 if width >= 700 else 42
-    margin_v = 165 if height >= 1200 else 130
+    font_size = 56 if width >= 700 else 44
+    margin_v = 175 if height >= 1200 else 135
 
     header = f"""[Script Info]
 ScriptType: v4.00+
@@ -80,7 +109,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,DejaVu Sans,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,1,2,45,45,{margin_v},1
+Style: Default,DejaVu Sans,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,1,2,50,50,{margin_v},1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -88,15 +117,43 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 
     events = []
     cursor = 0.0
+
     for scene, dur in zip(scenes, durations):
         txt = str(scene.get("subtitle_text") or "").strip()
         status = str(scene.get("subtitle_status") or "").upper()
+
         if txt and status not in ("NOT_REQUIRED", "SUBTITLE_ERROR"):
-            start = cursor + 0.05
-            end = max(start + 0.2, cursor + max(0.2, dur - 0.05))
-            events.append(
-                f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Default,,0,0,0,,{ass_escape(txt)}"
-            )
+            chunks = split_caption_chunks(txt, max_words=3)
+
+            # Keep a tiny gap at the beginning/end of the scene.
+            scene_start = cursor + 0.06
+            scene_end = cursor + max(0.20, dur - 0.06)
+            usable = max(0.20, scene_end - scene_start)
+
+            # Timing is weighted by number of words so short chunks do not linger
+            # as long as long chunks. This gives a much more dynamic Shorts feel.
+            weights = [max(1, len(chunk.split())) for chunk in chunks]
+            total_weight = max(1, sum(weights))
+
+            chunk_start = scene_start
+
+            for idx, (chunk, weight) in enumerate(zip(chunks, weights)):
+                if idx == len(chunks) - 1:
+                    chunk_end = scene_end
+                else:
+                    chunk_end = chunk_start + usable * (weight / total_weight)
+
+                # Prevent ultra-short flashes.
+                if chunk_end - chunk_start < 0.38:
+                    chunk_end = min(scene_end, chunk_start + 0.38)
+
+                if chunk_end > chunk_start:
+                    events.append(
+                        f"Dialogue: 0,{ass_time(chunk_start)},{ass_time(chunk_end)},Default,,0,0,0,,{ass_escape(chunk)}"
+                    )
+
+                chunk_start = chunk_end
+
         cursor += dur
 
     Path(path).write_text(header + "\n".join(events) + "\n", encoding="utf-8")
